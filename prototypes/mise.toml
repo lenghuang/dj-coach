@@ -1,0 +1,7 @@
+[tasks.setup]
+description = "Install dependencies with uv"
+run = "uv sync --all-extras"
+
+[tasks.pretty]
+description = "Use ruff to lint and format code"
+run = "uv run ruff check --fix . && uv run ruff format ."
