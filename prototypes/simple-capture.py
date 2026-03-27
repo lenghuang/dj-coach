@@ -1,11 +1,10 @@
 import json
 import time
-from datetime import datetime
-
 import mido
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
+from datetime import datetime
 
 # Official Pioneer DDJ-FLX4 MIDI Control Mapping
 MIDI_CONTROLS = {
@@ -83,21 +82,29 @@ class SimpleCapture:
         self.chunk_size = 2048
         self.audio_device = self._find_audio_device()
         self.midi_device = self._find_midi_device()
-
-        # Data storage
         self.audio_frames = []
         self.midi_events = []
         self.start_time = None
+        self.last_meter_update = 0
 
     def _find_audio_device(self):
-        """Find DDJ-FLX4 audio device"""
+        """Find the virtual bridge (BlackHole) for recording"""
         devices = sd.query_devices()
+
+        # 1. Look for BlackHole first (this is our bridge from Rekordbox)
         for i, device in enumerate(devices):
-            if "DDJ" in device["name"] or "FLX4" in device["name"]:
-                print(f"✓ Found audio device: {device['name']} (index {i})")
+            if "BlackHole" in device["name"] and device["max_input_channels"] > 0:
+                print(f"✓ Found recording bridge: {device['name']} (index {i})")
                 return i
-        print("⚠️ DDJ-FLX4 not found, using device 0")
-        return 0
+
+        # 2. Fallback to FLX4 (though this usually only works if PC Master Out is on)
+        for i, device in enumerate(devices):
+            if ("DDJ" in device["name"] or "FLX4" in device["name"]) and device["max_input_channels"] > 0:
+                print(f"✓ Found DDJ-FLX4 input: {device['name']} (index {i})")
+                return i
+
+        print("⚠️ Recording bridge not found, using system default input")
+        return None # sounddevice will use default if None
 
     def _find_midi_device(self):
         """Find DDJ-FLX4 MIDI device"""
@@ -121,25 +128,36 @@ class SimpleCapture:
         for i, name in enumerate(mido.get_input_names()):
             print(f"{i}: {name}")
 
+
     def start(self):
-        """Start capturing audio and MIDI"""
         if self.midi_device is None:
             print("Cannot start: no MIDI device found")
             return
 
         midi_input = mido.open_input(self.midi_device)
+        self.start_time = time.time()
 
-        print("\n✓ Recording from:")
-        print(f"  Audio: Device {self.audio_device}")
-        print(f"  MIDI: {self.midi_device}")
-        print("Press Ctrl+C to stop\n")
+        print(f"\n✓ Recording Audio from: Index {self.audio_device}")
+        print(f"✓ Monitoring MIDI from: {self.midi_device}")
+        print("--- LOOK FOR THE VOLUME BAR BELOW ---")
 
         def audio_callback(indata, frames, time_info, status):
             if status:
                 print(f"⚠️ {status}")
+
+            # Store audio
             self.audio_frames.append(indata.copy())
 
-        self.start_time = time.time()
+            # --- VOLUME METER LOGIC ---
+            # Update meter every 0.1 seconds to avoid flickering
+            if time.time() - self.last_meter_update > 0.1:
+                volume_norm = np.linalg.norm(indata) * 10
+                magnitude = int(volume_norm)
+                # Visual Bar: [||||      ]
+                bar = "█" * min(magnitude, 30)
+                spacer = " " * (30 - len(bar))
+                print(f"\rAUDIO LEVEL: [{bar}{spacer}]", end="", flush=True)
+                self.last_meter_update = time.time()
 
         try:
             with sd.InputStream(
@@ -152,16 +170,11 @@ class SimpleCapture:
                 while True:
                     for msg in midi_input.iter_pending():
                         elapsed = time.time() - self.start_time
-                        event = {
-                            "time": elapsed,
-                            "type": msg.type,
-                            "message": str(msg),
-                        }
+                        event = {"time": elapsed, "type": msg.type, "message": str(msg)}
                         self.midi_events.append(event)
-                        print(format_midi_event(msg, elapsed))
-
+                        # Use \n to move past the volume meter line
+                        print(f"\n{format_midi_event(msg, elapsed)}")
                     time.sleep(0.01)
-
         except KeyboardInterrupt:
             print("\n\n✋ Stopped")
             midi_input.close()
@@ -172,6 +185,12 @@ class SimpleCapture:
         if not self.audio_frames:
             print("No audio captured")
             return
+
+        # ... (Same as your previous save function) ...
+        # Add a check: if max volume in audio_array is 0, warn the user
+        audio_array = np.concatenate(self.audio_frames)
+        if np.max(np.abs(audio_array)) < 0.0001:
+            print("⚠️ WARNING: Recorded audio is SILENT. Check Rekordbox Audio Settings.")
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         audio_array = np.concatenate(self.audio_frames)
