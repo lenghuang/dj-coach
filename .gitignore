@@ -1,0 +1,16 @@
+# uv
+.venv/
+__pycache__/
+*.pyc
+
+# Captures
+capture_*.wav
+capture_*.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# mac
+.DS_Store
