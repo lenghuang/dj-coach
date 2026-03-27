@@ -1,6 +1,11 @@
 [tasks.setup]
 description = "Install dependencies with uv"
-run = "uv sync --all-extras"
+run = "uv sync --all-extras --prerelease=allow"
+
+[tasks.nuke]
+description = "Nuke dependencies"
+run = "rm -rf .venv uv.lock"
+
 
 [tasks.pretty]
 description = "Use ruff to lint and format code"
