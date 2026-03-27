@@ -32,6 +32,10 @@ Was able to get something together that picks up on button presses... but right 
 
 ![./media/day-1.gif](./media/day-1.gif)
 
+Eventually installed blackhole, did some midi channel setup, and then had some dependency hell, and got it working!
+
+![./media/day-1-fixed-sound.gif](./media/day-1-fixed-sound.gif)
+
 # AI Slop Appendix
 
 ## Conversation with Claude
