@@ -6,40 +6,64 @@ import numpy as np
 import sounddevice as sd
 import soundfile as sf
 from datetime import datetime
+import argparse
 
 MIDI_CONTROLS = {
-    10: ("Trim Left", "Channel 1 Trim"),
-    17: ("EQ High Left", "Channel 1 High EQ"),
-    18: ("EQ Mid Left", "Channel 1 Mid EQ"),
-    27: ("EQ Low Left", "Channel 1 Low EQ"),
-    43: ("Filter Left", "Channel 1 Filter"),
-    11: ("Trim Right", "Channel 2 Trim"),
-    40: ("EQ High Right", "Channel 2 High EQ"),
-    41: ("EQ Mid Right", "Channel 2 Mid EQ"),
-    42: ("EQ Low Right", "Channel 2 Low EQ"),
-    44: ("Filter Right", "Channel 2 Filter"),
-    19: ("Crossfader", "Master Crossfader"),
-    51: ("Master Level", "Master Volume"),
-    33: ("Tempo Fader Left", "Channel 1 Tempo"),
-    64: ("Browse", "Browse/Track Selection"),
-    100: ("Browse Shift", "Browse with Shift"),
+    # Deck 1 (ch=0)
+    (0, 11): ("Trim", "deck1_trim"),
+    (0, 15): ("EQ High", "deck1_eq_high"),
+    (0, 47): ("EQ Mid", "deck1_eq_mid"),
+    (0, 23): ("EQ Low", "deck1_eq_low"),
+    (0, 43): ("Filter", "deck1_filter"),
+    (0, 33): ("Tempo", "deck1_tempo"),
+    (0, 34): ("Tempo Fine", "deck1_tempo_fine"),
+    # Deck 2 (ch=1)
+    (1, 11): ("Trim", "deck2_trim"),
+    (1, 15): ("EQ High", "deck2_eq_high"),
+    (1, 47): ("EQ Mid", "deck2_eq_mid"),
+    (1, 39): ("EQ Low", "deck2_eq_low"),
+    (1, 43): ("Filter", "deck2_filter"),
+    (1, 33): ("Tempo", "deck2_tempo"),
+    (1, 34): ("Tempo Fine", "deck2_tempo_fine"),
+    (1,  7): ("???", "deck2_???"),
+    # Master (ch=0 shared)
+    (0, 19): ("Crossfader", "master_crossfader"),
+    (0, 51): ("Master Level", "master_volume"),
+    # Effects/Mixer (ch=6)
+    (6, 13): ("???", "fx_???"),
+    (6, 23): ("???", "fx_???"),
+    (6, 24): ("???", "fx_???"),
+    (6, 45): ("???", "fx_???"),
+    (6, 55): ("???", "fx_???"),
+    (6, 56): ("???", "fx_???"),
+    # ch=4, ch=5 — likely effects sends or loop controls
+    (4,  2): ("???", "ch4_???"),
+    (4, 34): ("???", "ch4_???"),
+    (5,  2): ("???", "ch5_???"),
+    (5, 34): ("???", "ch5_???"),
 }
 
 MIDI_NOTES = {
-    27: ("Hot Cue Pad 1 - Deck 1", "hot_cue"),
-    30: ("Hot Cue Pad 2 - Deck 1", "hot_cue"),
-    32: ("Hot Cue Pad 3 - Deck 1", "hot_cue"),
-    34: ("Hot Cue Pad 4 - Deck 1", "hot_cue"),
-    16: ("Beat Sync/Jump - Deck 1", "beat"),
-    17: ("Beat Sync/Jump - Deck 2", "beat"),
-    11: ("Cue - Deck 1", "cue"),
-    12: ("Cue - Deck 2", "cue"),
-    54: ("Jog Left Touch", "jog"),
+    (0, 11): ("Cue", "deck1_cue"),
+    (1, 11): ("Cue", "deck2_cue"),
+    (0, 54): ("Jog Touch", "deck1_jog"),
+    (1, 54): ("Jog Touch", "deck2_jog"),
+    (0, 77): ("???", "deck1_???"),
+    (1, 77): ("???", "deck2_???"),
+    (0, 18): ("???", "deck1_???"),
+    (0, 19): ("???", "deck1_???"),
+    (5, 71): ("???", "ch5_???"),
 }
 
 # Controls that should be debounced (faders, knobs, encoders).
 # Note messages (pads, buttons) are never debounced.
-DEBOUNCE_CONTROLS = {19, 51, 10, 11, 17, 18, 27, 40, 41, 42, 43, 44, 33, 64, 100}
+DEBOUNCE_CONTROLS = {
+    (0, 19), (0, 51), (0, 11), (0, 15), (0, 47), (0, 23), (0, 43), (0, 33), (0, 34),
+    (1, 11), (1, 15), (1, 47), (1, 39), (1, 43), (1, 33), (1, 34), (1,  7),
+    (6, 13), (6, 23), (6, 24), (6, 45), (6, 55), (6, 56),
+    (4,  2), (4, 34), (5,  2), (5, 34),
+}
+
 DEBOUNCE_MS = 50  # ms of silence before emitting a control change
 
 
@@ -47,7 +71,7 @@ def format_midi_event(msg, elapsed_time):
     base = f"[{elapsed_time:.2f}s]"
 
     if msg.type == "control_change":
-        control_name = MIDI_CONTROLS.get(msg.control, f"CC {msg.control}")
+        control_name = MIDI_CONTROLS.get(msg.control, (f"CC {msg.control}", "unknown"))[0]
         value_percent = round((msg.value / 127) * 100)
         return (
             f"{base} 🎚️  {control_name}\n"
@@ -104,7 +128,7 @@ class MidiDebouncer:
 
     def feed(self, msg, elapsed_time):
         """Call with every incoming MIDI message."""
-        if msg.type != "control_change" or msg.control not in DEBOUNCE_CONTROLS:
+        if msg.type != "control_change" or (msg.channel, msg.control) not in DEBOUNCE_CONTROLS:
             # Buttons, pads, note on/off — emit immediately
             if self._on_emit:
                 self._on_emit(msg, elapsed_time)
@@ -158,11 +182,116 @@ class SimpleCapture:
         self.last_meter_update = 0
         self._debouncer = MidiDebouncer(on_emit=self._record_event)
 
+    def learn(self):
+        if self.midi_device is None:
+            print("Cannot start: no MIDI device found")
+            return
+
+        seen = {}  # (channel, type, control_or_note) -> first occurrence
+
+        print("\n🎓 LEARN MODE — touch each control slowly, one at a time")
+        print("   New controls will be printed. Known controls will be silent.")
+        print("   Ctrl+C to stop and print summary.\n")
+
+        midi_input = mido.open_input(self.midi_device)
+
+        try:
+            while True:
+                for msg in midi_input.iter_pending():
+                    if msg.type == "control_change":
+                        key = ("cc", msg.channel, msg.control)
+                        if key not in seen:
+                            seen[key] = msg.value
+                            print(f"  NEW CC  | ch={msg.channel:2d}  cc={msg.control:3d}  val={msg.value:3d}  → add to MIDI_CONTROLS")
+                    elif msg.type in ("note_on", "note_off"):
+                        key = ("note", msg.channel, msg.note)
+                        if key not in seen:
+                            seen[key] = msg.velocity
+                            print(f"  NEW NOTE| ch={msg.channel:2d}  note={msg.note:3d}  vel={msg.velocity:3d}  → add to MIDI_NOTES")
+                    elif msg.type == "pitchwheel":
+                        key = ("pitch", msg.channel)
+                        if key not in seen:
+                            seen[key] = msg.pitch
+                            print(f"  NEW PITCH| ch={msg.channel:2d}  pitch={msg.pitch}  → pitchwheel on this channel")
+                    elif msg.type == "sysex":
+                        key = ("sysex", bytes(msg.data[:4]))  # first 4 bytes as fingerprint
+                        if key not in seen:
+                            seen[key] = True
+                            hex_data = " ".join(f"{b:02X}" for b in msg.data)
+                            print(f"  NEW SYSEX| data=[{hex_data}]")
+                time.sleep(0.01)
+
+        except KeyboardInterrupt:
+            midi_input.close()
+            print(f"\n\n{'='*50}")
+            print(f"LEARN SESSION SUMMARY — {len(seen)} unique controls found")
+            print(f"{'='*50}\n")
+
+            cc_entries = [(ch, ctrl, val) for (t, ch, ctrl), val in seen.items() if t == "cc"]
+            note_entries = [(ch, note, vel) for (t, ch, note), vel in seen.items() if t == "note"]
+
+            if cc_entries:
+                print("# Paste into MIDI_CONTROLS:")
+                for ch, ctrl, val in sorted(cc_entries, key=lambda x: (x[1], x[0])):
+                    existing = MIDI_CONTROLS.get((ch, ctrl))
+                    if existing:
+                        print(f"    ({ch}, {ctrl:3d}): {existing},  # ✓ already mapped")
+                    else:
+                        print(f"    ({ch}, {ctrl:3d}): (\"???\", \"???\"),  # NEEDS NAME")
+
+            if note_entries:
+                print("\n# Paste into MIDI_NOTES:")
+                for ch, note, vel in sorted(note_entries, key=lambda x: (x[1], x[0])):
+                    existing = MIDI_NOTES.get((ch, note))
+                    if existing:
+                        print(f"    ({ch}, {note:3d}): {existing},  # ✓ already mapped")
+                    else:
+                        print(f"    ({ch}, {note:3d}): (\"???\", \"???\"),  # NEEDS NAME")
+
     def _record_event(self, msg, elapsed_time):
-        """Receives debounced (or pass-through) events and stores + prints them."""
-        event = {"time": elapsed_time, "type": msg.type, "message": str(msg)}
+        event = self._serialize_msg(msg, elapsed_time)
         self.midi_events.append(event)
         print(f"\n{format_midi_event(msg, elapsed_time)}")
+
+    def _serialize_msg(self, msg, elapsed_time):
+        base = {
+            "time": round(elapsed_time, 4),
+            "type": msg.type,
+            "channel": msg.channel,
+        }
+
+        if msg.type == "control_change":
+            meta = MIDI_CONTROLS.get((msg.channel, msg.control), (f"CC {msg.control}", "unknown"))
+            base.update({
+                "control": msg.control,
+                "control_name": meta[0],
+                "control_category": meta[1],
+                "value": msg.value,
+                "value_normalized": round(msg.value / 127, 4),
+            })
+
+        elif msg.type in ("note_on", "note_off"):
+            meta = MIDI_NOTES.get((msg.channel, msg.note), (f"Note {msg.note}", "unknown"))
+            base.update({
+                "note": msg.note,
+                "note_name": meta[0],
+                "note_category": meta[1],
+                "velocity": msg.velocity,
+            })
+
+        elif msg.type == "pitchwheel":
+            base.update({
+                "pitch": msg.pitch,
+                "pitch_normalized": round(msg.pitch / 8192, 4),
+            })
+
+        elif msg.type == "sysex":
+            base.update({
+                "data_hex": [f"{b:02X}" for b in msg.data],
+                "data_len": len(msg.data),
+            })
+
+        return base
 
     def _find_audio_device(self):
         devices = sd.query_devices()
@@ -257,8 +386,9 @@ class SimpleCapture:
         with open(midi_file, "w") as f:
             json.dump(
                 {
-                    "duration_sec": len(audio_array) / self.sr,
-                    "num_events": len(self.midi_events),
+                    "schema_version": 1,
+                    "duration_sec": round(len(audio_array) / self.sr, 3),
+                    "event_count": len(self.midi_events),
                     "events": self.midi_events,
                 },
                 f,
@@ -269,12 +399,20 @@ class SimpleCapture:
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--learn", action="store_true", help="Learn mode: print raw MIDI without interpretation")
+    args = parser.parse_args()
+
     capture = SimpleCapture()
     capture.list_devices()
     print("\n" + "=" * 50)
-    input("Press Enter to start recording...")
-    capture.start()
 
+    if args.learn:
+        input("Press Enter to start learn mode (touch each control one at a time)...")
+        capture.learn()
+    else:
+        input("Press Enter to start recording...")
+        capture.start()
 
 if __name__ == "__main__":
     main()
